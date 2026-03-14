@@ -4,7 +4,7 @@ import type { GenreProfile } from "../models/genre-profile.js";
 import type { BookRules } from "../models/book-rules.js";
 import { buildWriterSystemPrompt } from "./writer-prompts.js";
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
-import { validatePostWrite } from "./post-write-validator.js";
+import { validatePostWrite, type PostWriteViolation } from "./post-write-validator.js";
 import { analyzeAITells } from "./ai-tells.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -32,6 +32,8 @@ export interface WriteChapterOutput {
   readonly updatedSubplots: string;
   readonly updatedEmotionalArcs: string;
   readonly updatedCharacterMatrix: string;
+  readonly postWriteErrors: ReadonlyArray<PostWriteViolation>;
+  readonly postWriteWarnings: ReadonlyArray<PostWriteViolation>;
 }
 
 export class WriterAgent extends BaseAgent {
@@ -117,11 +119,12 @@ export class WriterAgent extends BaseAgent {
     const ruleViolations = validatePostWrite(output.content, genreProfile, bookRules);
     const aiTellIssues = analyzeAITells(output.content).issues;
 
+    const postWriteErrors = ruleViolations.filter(v => v.severity === "error");
+    const postWriteWarnings = ruleViolations.filter(v => v.severity === "warning");
+
     if (ruleViolations.length > 0) {
-      const errors = ruleViolations.filter(v => v.severity === "error");
-      const warnings = ruleViolations.filter(v => v.severity === "warning");
       process.stderr.write(
-        `[writer] Post-write: ${errors.length} errors, ${warnings.length} warnings in chapter ${chapterNumber}\n`,
+        `[writer] Post-write: ${postWriteErrors.length} errors, ${postWriteWarnings.length} warnings in chapter ${chapterNumber}\n`,
       );
       for (const v of ruleViolations) {
         process.stderr.write(`  [${v.severity}] ${v.rule}: ${v.description}\n`);
@@ -136,7 +139,7 @@ export class WriterAgent extends BaseAgent {
       }
     }
 
-    return output;
+    return { ...output, postWriteErrors, postWriteWarnings };
   }
 
   async saveChapter(
@@ -290,7 +293,7 @@ ${params.volumeOutline}
     chapterNumber: number,
     content: string,
     genreProfile: GenreProfile,
-  ): WriteChapterOutput {
+  ): Omit<WriteChapterOutput, "postWriteErrors" | "postWriteWarnings"> {
     const extract = (tag: string): string => {
       const regex = new RegExp(
         `=== ${tag} ===\\s*([\\s\\S]*?)(?==== [A-Z_]+ ===|$)`,

@@ -415,26 +415,53 @@ export class PipelineRunner {
       ...(temperatureOverride ? { temperatureOverride } : {}),
     });
 
-    // 2. Audit chapter
+    // 2a. Post-write error gate: if deterministic rules found errors, auto-fix before LLM audit
+    let finalContent = output.content;
+    let finalWordCount = output.wordCount;
+    let revised = false;
+
+    if (output.postWriteErrors.length > 0) {
+      process.stderr.write(
+        `[pipeline] ${output.postWriteErrors.length} post-write errors detected, triggering spot-fix before audit\n`,
+      );
+      const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
+      const spotFixIssues = output.postWriteErrors.map((v) => ({
+        severity: "critical" as const,
+        category: v.rule,
+        description: v.description,
+        suggestion: v.suggestion,
+      }));
+      const fixResult = await reviser.reviseChapter(
+        bookDir,
+        finalContent,
+        chapterNumber,
+        spotFixIssues,
+        "spot-fix",
+        book.genre,
+      );
+      if (fixResult.revisedContent.length > 0) {
+        finalContent = fixResult.revisedContent;
+        finalWordCount = fixResult.wordCount;
+        revised = true;
+      }
+    }
+
+    // 2b. LLM audit
     const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
     const llmAudit = await auditor.auditChapter(
       bookDir,
-      output.content,
+      finalContent,
       chapterNumber,
       book.genre,
     );
-    const aiTellsResult = analyzeAITells(output.content);
-    const sensitiveWriteResult = analyzeSensitiveWords(output.content);
+    const aiTellsResult = analyzeAITells(finalContent);
+    const sensitiveWriteResult = analyzeSensitiveWords(finalContent);
     const hasBlockedWriteWords = sensitiveWriteResult.found.some((f) => f.severity === "block");
     let auditResult: AuditResult = {
       passed: hasBlockedWriteWords ? false : llmAudit.passed,
       issues: [...llmAudit.issues, ...aiTellsResult.issues, ...sensitiveWriteResult.issues],
       summary: llmAudit.summary,
     };
-
-    let finalContent = output.content;
-    let finalWordCount = output.wordCount;
-    let revised = false;
 
     // 3. If audit fails, try auto-revise once
     if (!auditResult.passed) {
